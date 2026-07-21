@@ -296,5 +296,41 @@ class TestUnknownEvents(WebhookTestCase):
         self.post_and_expect_nothing(event("customer.created", {"id": "cus_1"}))
 
 
+class TestEnvironment(unittest.TestCase):
+    def setUp(self):
+        init(dry_run=True)
+        self.addCleanup(sys.modules.pop, "stripe", None)
+
+    def _client(self, environment=None):
+        app = FastAPI()
+        app.include_router(create_stripe_webhook_router(secret="whsec_test", environment=environment))
+        return TestClient(app)
+
+    def _stub(self, livemode):
+        ev = event("charge.succeeded", {"id": "ch_1", "amount": 100, "amount_refunded": 0, "currency": "usd"})
+        ev["livemode"] = livemode
+        fake = types.ModuleType("stripe")
+        fake.Webhook = types.SimpleNamespace(construct_event=lambda *a: ev)
+        sys.modules["stripe"] = fake
+
+    def _post(self, client):
+        return client.post("/webhooks/stripe", content=b"{}", headers={"stripe-signature": "sig"})
+
+    def test_livemode_maps_to_production_and_test(self):
+        self._stub(True); self._post(self._client())
+        self.assertEqual(get_client().inspect()[-1]["environment"], "production")
+        init(dry_run=True)
+        self._stub(False); self._post(self._client())
+        self.assertEqual(get_client().inspect()[-1]["environment"], "test")
+
+    def test_string_override(self):
+        self._stub(True); self._post(self._client(environment="staging"))
+        self.assertEqual(get_client().inspect()[-1]["environment"], "staging")
+
+    def test_callable_override(self):
+        self._stub(True); self._post(self._client(environment=lambda e: "eu" if e["livemode"] else "eu-test"))
+        self.assertEqual(get_client().inspect()[-1]["environment"], "eu")
+
+
 if __name__ == "__main__":
     unittest.main()

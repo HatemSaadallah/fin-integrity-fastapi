@@ -117,7 +117,18 @@ def _price_of(obj):
     return items[0].get("price") or {}
 
 
-def _record(fi, event):
+def _environment_for(event, override=None):
+    """Environment to tag captured events with. A callable receives the Stripe
+    event; a string pins one; otherwise Stripe's own livemode decides (live ->
+    "production", test -> "test") so the two never reconcile against each other."""
+    if callable(override):
+        return override(event)
+    if isinstance(override, str):
+        return override
+    return "production" if event.get("livemode") else "test"
+
+
+def _record(fi, event, environment=None):
     """Map one Stripe event onto fin-integrity. Unknown events are ignored."""
     event_type = event["type"]
     obj = event["data"]["object"]
@@ -139,6 +150,7 @@ def _record(fi, event):
             amount_minor=amount,
             currency=obj.get("currency", "usd"),
             status=mapped[1],
+            environment=environment,
         )
         return
 
@@ -166,6 +178,7 @@ def _record(fi, event):
             currency=obj.get("currency", "usd"),
             status=status,
             parent_external_id=charge,
+            environment=environment,
         )
         return
 
@@ -194,6 +207,7 @@ def _record(fi, event):
             interval=(price.get("recurring") or {}).get("interval"),
             current_period_start=_unix_to_datetime(obj.get("current_period_start")),
             current_period_end=_unix_to_datetime(obj.get("current_period_end")),
+            environment=environment,
         )
         return
 
@@ -229,6 +243,7 @@ def _record(fi, event):
             currency=obj.get("currency", "usd"),
             status="succeeded",
             subscription_id=subscription,
+            environment=environment,
         )
 
 
@@ -255,9 +270,12 @@ def finintegrity_lifespan(**config):
     return lifespan
 
 
-def create_stripe_webhook_router(secret, path="/webhooks/stripe"):
+def create_stripe_webhook_router(secret, path="/webhooks/stripe", environment=None):
     """APIRouter with a POST endpoint that verifies the Stripe signature and
-    records processor-side payment/refund/dispute events and subscriptions."""
+    records processor-side payment/refund/dispute events and subscriptions.
+
+    `environment` tags captured events: a string pins one, a callable receives
+    the Stripe event, and the default derives it from Stripe's livemode."""
     router = APIRouter()
 
     @router.post(path)
@@ -275,7 +293,7 @@ def create_stripe_webhook_router(secret, path="/webhooks/stripe"):
 
         fi = get_client()
         if fi:
-            _record(fi, event)
+            _record(fi, event, _environment_for(event, environment))
         return Response(status_code=200)
 
     return router
